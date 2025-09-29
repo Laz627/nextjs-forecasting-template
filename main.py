@@ -62,26 +62,8 @@ def load_sample_ctr() -> pd.DataFrame:
         {
             "Position": list(range(1, 21)),
             "CTR": [
-                0.28,
-                0.14,
-                0.09,
-                0.06,
-                0.04,
-                0.028,
-                0.022,
-                0.018,
-                0.015,
-                0.012,
-                0.010,
-                0.009,
-                0.008,
-                0.007,
-                0.006,
-                0.005,
-                0.004,
-                0.0035,
-                0.003,
-                0.0025,
+                0.28, 0.14, 0.09, 0.06, 0.04, 0.028, 0.022, 0.018, 0.015, 0.012,
+                0.010, 0.009, 0.008, 0.007, 0.006, 0.005, 0.004, 0.0035, 0.003, 0.0025,
             ],
         }
     )
@@ -99,9 +81,7 @@ def load_kw_csv(file_bytes: bytes) -> pd.DataFrame:
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
     df["SV"] = pd.to_numeric(df["SV"], errors="coerce").fillna(0).astype(float)
-    df["Current Rank"] = (
-        pd.to_numeric(df["Current Rank"], errors="coerce").fillna(100).astype(float)
-    )
+    df["Current Rank"] = pd.to_numeric(df["Current Rank"], errors="coerce").fillna(100).astype(float)
     df["Page Template"] = df["Page Template"].astype(str)
     return df
 
@@ -121,30 +101,20 @@ def load_master_urls(file_bytes: bytes) -> pd.DataFrame:
 
 def rank_delta_rules(rank: float, flavor: str) -> int:
     if flavor == "conservative":
-        if 15 <= rank <= 20:
-            return 1
-        if 11 <= rank <= 14:
-            return 1
-        if 5 <= rank <= 9:
-            return 0
+        if 15 <= rank <= 20: return 1
+        if 11 <= rank <= 14: return 1
+        if 5  <= rank <= 9 : return 0
         return 0
     if flavor == "expected":
-        if 15 <= rank <= 20:
-            return 2
-        if 11 <= rank <= 14:
-            return 1
-        if 5 <= rank <= 9:
-            return 1
+        if 15 <= rank <= 20: return 2
+        if 11 <= rank <= 14: return 1
+        if 5  <= rank <= 9 : return 1
         return 0
     if flavor == "aggressive":
-        if 1 <= rank <= 4:
-            return 1
-        if 15 <= rank <= 20:
-            return 3
-        if 11 <= rank <= 14:
-            return 2
-        if 5 <= rank <= 9:
-            return 1
+        if 1  <= rank <= 4 : return 1
+        if 15 <= rank <= 20: return 3
+        if 11 <= rank <= 14: return 2
+        if 5  <= rank <= 9 : return 1
         return 0
     return 0
 
@@ -152,15 +122,12 @@ def rank_delta_rules(rank: float, flavor: str) -> int:
 def extract_site_section(url: str) -> str:
     try:
         u = str(url)
-        if "//" in u:
-            u = u.split("//", 1)[1]
+        if "//" in u: u = u.split("//", 1)[1]
         path = "/" + u.split("/", 1)[1] if "/" in u else "/"
         path = path.split("?", 1)[0].split("#", 1)[0]
         segs = path.strip("/").split("/") if path else []
-        if len(segs) == 0 or segs[0] == "":
-            return "homepage"
-        if len(segs) == 1:
-            return "misc"
+        if len(segs) == 0 or segs[0] == "": return "homepage"
+        if len(segs) == 1:                  return "misc"
         return segs[0].lower()
     except Exception:
         return "unknown"
@@ -178,9 +145,7 @@ def default_revenue_bounds(avg_revenue: float) -> Dict[str, float]:
     return {"min": avg_revenue * 0.8, "avg": avg_revenue, "max": avg_revenue * 1.2}
 
 
-def expand_rollout_phases(
-    phases: List[Dict], groups: List[str], horizon: int, start_offset: int
-) -> pd.DataFrame:
+def expand_rollout_phases(phases: List[Dict], groups: List[str], horizon: int, start_offset: int) -> pd.DataFrame:
     months = list(range(1, horizon + 1))
     rows = []
     current_month = max(1, int(start_offset))  # phases start at global work start
@@ -207,16 +172,12 @@ def default_classifier_multipliers() -> Dict[int, float]:
     return {30: 0.3, 50: 0.5, 70: 0.7, 90: 1.0}
 
 
-def compute_overall_migrated_pct(
-    rollout_df: pd.DataFrame, counts_by_group: pd.Series
-) -> pd.DataFrame:
+def compute_overall_migrated_pct(rollout_df: pd.DataFrame, counts_by_group: pd.Series) -> pd.DataFrame:
     live_share = []
     total = max(1, counts_by_group.sum())
     for m, g in rollout_df.groupby("Month"):
         live_groups = g.loc[g["IsLive"] == 1, "Group"].tolist()
-        share = (
-            counts_by_group.loc[counts_by_group.index.isin(live_groups)].sum() / total
-        )
+        share = counts_by_group.loc[counts_by_group.index.isin(live_groups)].sum() / total
         live_share.append({"Month": m, "OverallMigratedPct": float(share)})
     return rollout_df.merge(pd.DataFrame(live_share), on="Month", how="left")
 
@@ -224,19 +185,15 @@ def compute_overall_migrated_pct(
 def classifier_multiplier_for_pct(pct: float, milestones: Dict[int, float]) -> float:
     pct100 = pct * 100
     applicable = [k for k in milestones.keys() if k <= pct100]
-    if not applicable:
-        return 0.0
+    if not applicable: return 0.0
     return float(milestones[max(applicable)])
 
 
 def realization_factor(month: int, runway: int, mode: str, ramp_months: int) -> float:
-    if month <= runway:
-        return 0.0
+    if month <= runway: return 0.0
     t = max(0, month - runway)
-    if mode == "Step":
-        return 1.0
-    if mode == "Linear":
-        return float(min(1.0, t / max(1, ramp_months)))
+    if mode == "Step":   return 1.0
+    if mode == "Linear": return float(min(1.0, t / max(1, ramp_months)))
     x = float(min(1.0, t / max(1, ramp_months)))  # S-curve
     return 3 * x * x - 2 * x * x * x
 
@@ -379,7 +336,7 @@ def run_forecast(
                 "RevMin_baseline": float(baseline_monthly_df.loc[m, "RevMin_baseline"]),
                 "RevAvg_baseline": float(baseline_monthly_df.loc[m, "RevAvg_baseline"]),
                 "RevMax_baseline": float(baseline_monthly_df.loc[m, "RevMax_baseline"]),
-                # Incremental (counts clipped at 0)
+                # Incremental
                 "Clicks_incr": float(total_clicks - baseline_monthly_df.loc[m, "Clicks_baseline"]),
                 "RTA_incr": int(max(0, total_rtas - baseline_monthly_df.loc[m, "RTA_baseline"])),
                 "Jobs_incr": int(max(0, total_jobs - baseline_monthly_df.loc[m, "Jobs_baseline"])),
@@ -444,41 +401,27 @@ with st.sidebar:
     st.markdown("**Conversions & Revenue**")
     rta_default = st.number_input(
         label="Global RTA submit rate per visit (fallback)",
-        min_value=0.0,
-        max_value=1.0,
-        value=0.008,
-        step=0.001,
-        format="%f",
+        min_value=0.0, max_value=1.0, value=0.008, step=0.001, format="%f",
+        help="Used when no per-section override is provided. Example: 0.008 = 0.8%."
     )
     close_rate = st.number_input(
         label="Close rate from RTA submit",
-        min_value=0.0,
-        max_value=1.0,
-        value=0.19,
-        step=0.01,
-        format="%f",
+        min_value=0.0, max_value=1.0, value=0.19, step=0.01, format="%f",
+        help="Fraction of RTA submits that become closed jobs."
     )
     avg_rev = st.number_input(
         label="Avg revenue per job ($)",
-        min_value=0.0,
-        max_value=10_000_000.0,
-        value=23_000.0,
-        step=500.0,
+        min_value=0.0, max_value=10_000_000.0, value=23_000.0, step=500.0,
+        help="Mean revenue per closed job."
     )
     bounds = default_revenue_bounds(avg_rev)
     rev_min = st.number_input(
         label="Min revenue per job ($)",
-        min_value=0.0,
-        max_value=float(avg_rev),
-        value=float(bounds["min"]),
-        step=500.0,
+        min_value=0.0, max_value=float(avg_rev), value=float(bounds["min"]), step=500.0
     )
     rev_max = st.number_input(
         label="Max revenue per job ($)",
-        min_value=float(avg_rev),
-        max_value=50_000_000.0,
-        value=float(bounds["max"]),
-        step=500.0,
+        min_value=float(avg_rev), max_value=50_000_000.0, value=float(bounds["max"]), step=500.0
     )
 
     st.markdown("---")
@@ -488,14 +431,11 @@ with st.sidebar:
     )
     work_start_month = st.number_input(
         "Work start month (1 = now)",
-        min_value=1,
-        max_value=int(horizon_months),
-        value=1,
-        step=1,
+        min_value=1, max_value=int(horizon_months), value=1, step=1
     )
 
     st.markdown("---")
-    st.markdown("**Runway & Realization**")
+    st.markmarkdown("**Runway & Realization**") if False else None
     runway_choice = st.radio(
         "Runway before benefits start", ["3 months", "6 months"], index=0, horizontal=True
     )
@@ -511,10 +451,7 @@ with st.sidebar:
     st.markdown("**Aggressiveness**")
     dampening = st.slider(
         "Scenario dampening (0.25 conservative → 1.0 aggressive)",
-        min_value=0.25,
-        max_value=1.0,
-        value=0.6,
-        step=0.05,
+        min_value=0.25, max_value=1.0, value=0.6, step=0.05,
     )
 
     st.markdown("---")
@@ -581,13 +518,8 @@ ctr_table = build_group_ctr(sorted(df[group_col].unique().tolist()), curve_edit)
 st.subheader(f"RTA Submit Rate by {group_choice}")
 st.caption("Enter as decimals (e.g., 0.008 = 0.8%).")
 defaults = {
-    "shop": 0.0030,
-    "locations": 0.0280,
-    "homepage": 0.0210,
-    "ideas": 0.0037,
-    "inspiration": 0.0011,
-    "professionals": 0.0044,
-    "performance": 0.0067,
+    "shop": 0.0030, "locations": 0.0280, "homepage": 0.0210, "ideas": 0.0037,
+    "inspiration": 0.0011, "professionals": 0.0044, "performance": 0.0067,
 }
 groups = sorted(df[group_col].unique().tolist())
 rta_rows = [{group_choice: g, "RTA Rate": defaults.get(str(g).lower(), 0.008)} for g in groups]
@@ -669,7 +601,7 @@ num_cols = [
 for c in [c for c in num_cols if c in monthly.columns]:
     monthly[c] = pd.to_numeric(monthly[c], errors="coerce").fillna(0.0)
 
-# Executive summaries
+# Executive summaries (Totals)
 st.subheader(f"Executive Summary – All-in ({horizon_months} months)")
 summary_allin = monthly.groupby("Scenario").agg(
     Clicks_allin=("Clicks_allin","sum"),
@@ -697,15 +629,16 @@ for c in ["RTA_incr","Jobs_incr"]:
 st.dataframe(summary_incr, width="stretch")
 
 # Month snapshot
-st.subheader(f"Month {horizon_months} Snapshot (All-in & Incremental)")
-snap = monthly[monthly["Month"] == int(horizon_months)]
+last_m = int(horizon_months)
+st.subheader(f"Month {last_m} Snapshot (All-in & Incremental)")
+snap = monthly[monthly["Month"] == last_m]
 cols = st.columns(len(scenarios))
 for i, scen in enumerate(scenarios):
     m = snap[snap["Scenario"] == scen]
     if m.empty:
         continue
     with cols[i]:
-        st.metric(f"{scen} – Clicks (M{horizon_months}, All-in)", f"{m['Clicks_allin'].iloc[0]:,.0f}")
+        st.metric(f"{scen} – Clicks (M{last_m}, All-in)", f"{m['Clicks_allin'].iloc[0]:,.0f}")
         st.metric("RTA (M, All-in)", f"{m['RTA_allin'].iloc[0]:,d}")
         st.metric("Jobs (M, All-in)", f"{m['Jobs_allin'].iloc[0]:,d}")
         st.metric("Revenue Avg (M, All-in)", f"${m['RevenueAvg_allin'].iloc[0]:,.0f}")
