@@ -7,7 +7,7 @@
 # - Scenarios: Baseline, Conservative, Expected, Aggressive (rule-based deltas by current rank band)
 # - Rollouts: ordered phases with groups and durations (months)
 # - Sitewide classifier milestones: 30/50/70/90% migration -> multipliers to realized gains
-# - Runway toggle: 3 or 6 months before benefits can start; **post-runway ramp** controls added (step/linear/S-curve)
+# - Runway toggle: 3 or 6 months before benefits can start; post-runway ramp controls (Step/Linear/S-curve)
 # - Conversions: Global defaults RTA 0.8%, close 19%, avg revenue $23,000 + per-group RTA overrides
 # - Integer constraints: RTA & Job closes floored at monthly aggregates
 # - Scales to ~25k rows via vectorized pandas
@@ -23,6 +23,14 @@ st.set_page_config(page_title="SEO Impact Forecaster", layout="wide")
 st.title("SEO Impact Forecaster")
 st.caption("Forecast traffic → RTA submits → job closes → revenue from ranking improvements, rollouts, sitewide effects, and section-level RTA rates.")
 
+# ---------- Global CSS: left-align all st.dataframe cells ----------
+st.markdown("""
+<style>
+/* Left-align headers and cells inside all Streamlit dataframes */
+.stDataFrame table th, .stDataFrame table td { text-align: left !important; }
+</style>
+""", unsafe_allow_html=True)
+
 # -----------------------------
 # Helpers
 # -----------------------------
@@ -33,7 +41,7 @@ def load_sample_ctr() -> pd.DataFrame:
         "Position": list(range(1, 21)),
         # Decaying curve (placeholder). You can overwrite in the UI
         "CTR": [0.28, 0.14, 0.09, 0.06, 0.04, 0.028, 0.022, 0.018, 0.015, 0.012,
-                 0.010, 0.009, 0.008, 0.007, 0.006, 0.005, 0.004, 0.0035, 0.003, 0.0025]
+                0.010, 0.009, 0.008, 0.007, 0.006, 0.005, 0.004, 0.0035, 0.003, 0.0025]
     })
     total = base["CTR"].sum()
     base["CTR"] = base["CTR"] * (0.40 / total)
@@ -56,7 +64,6 @@ def load_csv(file_bytes: bytes) -> pd.DataFrame:
 # Conservative: 15–20 → +1; 11–14 → +1; 5–9 → +0; top 1–4: +0
 # Expected:     15–20 → +2; 11–14 → +1; 5–9 → +1; top 1–4: +0
 # Aggressive:   15–20 → +3; 11–14 → +2; 5–9 → +1; top 1–4: +1
-
 def rank_delta_rules(rank: float, flavor: str) -> int:
     if flavor == "conservative":
         if 15 <= rank <= 20:
@@ -87,7 +94,6 @@ def rank_delta_rules(rank: float, flavor: str) -> int:
     return 0
 
 # Grouping utils
-
 def extract_site_section(url: str) -> str:
     try:
         u = str(url)
@@ -116,7 +122,6 @@ def default_revenue_bounds(avg_revenue: float) -> Dict[str, float]:
     return {"min": avg_revenue * 0.8, "avg": avg_revenue, "max": avg_revenue * 1.2}
 
 # Rollouts & classifier
-
 def expand_rollout_phases(phases: List[Dict], groups: List[str]) -> pd.DataFrame:
     months = list(range(1, 13))
     rows = []
@@ -156,7 +161,6 @@ def classifier_multiplier_for_pct(pct: float, milestones: Dict[int, float]) -> f
     return float(milestones[max(applicable)])
 
 # Realization curve after runway
-
 def realization_factor(month: int, runway: int, mode: str, ramp_months: int) -> float:
     if month <= runway:
         return 0.0
@@ -171,7 +175,6 @@ def realization_factor(month: int, runway: int, mode: str, ramp_months: int) -> 
     return 3 * x * x - 2 * x * x * x
 
 # Core forecast
-
 def apply_rank_shift(current_rank: np.ndarray, scenario: str) -> np.ndarray:
     if scenario == "Baseline":
         return current_rank.copy()
@@ -311,40 +314,88 @@ def run_forecast(
 # -----------------------------
 # Sidebar Controls
 # -----------------------------
-upload = st.file_uploader("Upload CSV (columns: URL, SV, Current Rank, Page Template)", type=["csv"])
+upload = st.file_uploader(
+    "Upload CSV (columns: URL, SV, Current Rank, Page Template)",
+    type=["csv"],
+    help="Upload your keyword list. Only four columns are required and must match names exactly."
+)
 
 with st.sidebar:
     st.header("Assumptions & Controls")
     st.markdown("**Conversions & Revenue**")
-    rta_default = st.number_input("Global RTA submit rate per visit (fallback)", min_value=0.0, max_value=1.0, value=0.008, step=0.001, format="%f")
-    close_rate = st.number_input("Close rate from RTA submit", min_value=0.0, max_value=1.0, value=0.19, step=0.01, format="%f")
-    avg_rev = st.number_input("Avg revenue per job ($)", min_value=0.0, value=23000.0, step=500.0)
-    rev_min = st.number_input("Min revenue per job ($)", min_value=0.0, value=float(default_revenue_bounds(avg_rev)["min"]), step=500.0)
-    rev_max = st.number_input("Max revenue per job ($)", min_value=0.0, value=float(default_revenue_bounds(avg_rev)["max"]), step=500.0)
+    rta_default = st.number_input(
+        "Global RTA submit rate per visit (fallback)",
+        min_value=0.0, max_value=1.0, value=0.008, step=0.001, format="%f",
+        help="Used when no per-section override is provided. Example: 0.008 = 0.8% of visits submit RTA."
+    )
+    close_rate = st.number_input(
+        "Close rate from RTA submit",
+        min_value=0.0, max_value=1.0, value=0.19, step=0.01, format="%f",
+        help="Fraction of RTA submits that become closed jobs."
+    )
+    avg_rev = st.number_input(
+        "Avg revenue per job ($)",
+        min_value=0.0, value=23000.0, step=500.0,
+        help="Mean revenue per closed job. Min/Max bounds drive the low/high revenue cases."
+    )
+    rev_min = st.number_input(
+        "Min revenue per job ($)",
+        min_value=0.0, value=float(default_revenue_bounds(avg_rev)["min"]), step=500.0,
+        help="Lower bound for revenue per job."
+    )
+    rev_max = st.number_input(
+        "Max revenue per job ($)",
+        min_value=0.0, value=float(default_revenue_bounds(avg_rev)["max"]), step=500.0,
+        help="Upper bound for revenue per job."
+    )
 
     st.markdown("---")
     st.markdown("**Runway & Realization**")
-    runway_choice = st.radio("Runway before benefits start", options=["3 months", "6 months"], index=0, horizontal=True)
+    runway_choice = st.radio(
+        "Runway before benefits start",
+        options=["3 months", "6 months"], index=0, horizontal=True,
+        help="Model waits this long before any incremental gains can materialize."
+    )
     runway_months = 3 if runway_choice.startswith("3") else 6
-    ramp_mode = st.radio("Post-runway ramp", options=["Step", "Linear", "S-curve"], index=1, horizontal=True)
-    ramp_months = st.number_input("Ramp duration (months)", min_value=1, max_value=12, value=6, step=1)
+    ramp_mode = st.radio(
+        "Post-runway ramp",
+        options=["Step", "Linear", "S-curve"], index=1, horizontal=True,
+        help="How fast incremental gains realize *after* runway: instant, straight-line, or smooth S-curve."
+    )
+    ramp_months = st.number_input(
+        "Ramp duration (months)",
+        min_value=1, max_value=12, value=6, step=1,
+        help="How many months it takes to reach ~100% of incremental gains after the runway."
+    )
 
     st.markdown("---")
     st.markdown("**Aggressiveness**")
-    dampening = st.slider("Scenario dampening (0.25 conservative → 1.0 aggressive)", 0.25, 1.0, 0.6, 0.05)
+    dampening = st.slider(
+        "Scenario dampening (0.25 conservative → 1.0 aggressive)",
+        0.25, 1.0, 0.6, 0.05,
+        help="Global multiplier on incremental gains (applied after rollout, classifier, and ramp)."
+    )
 
     st.markdown("---")
     st.markdown("**Scenarios**")
     scen_opts = ["Baseline", "Conservative", "Expected", "Aggressive"]
-    scenarios = st.multiselect("Select scenarios", options=scen_opts, default=["Baseline", "Expected"])
+    scenarios = st.multiselect(
+        "Select scenarios",
+        options=scen_opts, default=["Baseline", "Expected"],
+        help="Baseline = current ranking. Others use rank heuristics by position band."
+    )
 
     st.markdown("---")
     st.markdown("**Sitewide Classifier Milestones**")
     ms = default_classifier_multipliers()
-    c30 = st.slider("30% migrated multiplier", 0.0, 1.0, float(ms[30]), 0.05)
-    c50 = st.slider("50% migrated multiplier", 0.0, 1.0, float(ms[50]), 0.05)
-    c70 = st.slider("70% migrated multiplier", 0.0, 1.0, float(ms[70]), 0.05)
-    c90 = st.slider("90% migrated multiplier", 0.0, 1.0, float(ms[90]), 0.05)
+    c30 = st.slider("30% migrated multiplier", 0.0, 1.0, float(ms[30]), 0.05,
+                    help="When ~30% of URLs have shipped to the new stack, apply this cap to realized gains.")
+    c50 = st.slider("50% migrated multiplier", 0.0, 1.0, float(ms[50]), 0.05,
+                    help="Cap applied when ~50% of URLs are migrated.")
+    c70 = st.slider("70% migrated multiplier", 0.0, 1.0, float(ms[70]), 0.05,
+                    help="Cap applied when ~70% of URLs are migrated.")
+    c90 = st.slider("90% migrated multiplier", 0.0, 1.0, float(ms[90]), 0.05,
+                    help="Cap applied when ~90% of URLs are migrated.")
     milestones = {30: c30, 50: c50, 70: c70, 90: c90}
 
 # -----------------------------
@@ -361,7 +412,7 @@ except Exception as e:
     st.error(f"Error reading CSV: {e}")
     st.stop()
 
-# Derive site section from URL if not present
+# Derive site section from URL
 df["Site Section"] = df["URL"].astype(str).apply(extract_site_section)
 
 st.subheader("Input Snapshot")
@@ -369,24 +420,41 @@ st.dataframe(df.head(20), use_container_width=True)
 
 # Grouping selection
 st.subheader("Forecast Grouping")
-group_choice = st.radio("Group by", options=["Site Section", "Page Template"], index=0, horizontal=True)
+group_choice = st.radio(
+    "Group by",
+    options=["Site Section", "Page Template"], index=0, horizontal=True,
+    help="Choose the dimension used for CTR curves, rollouts, and RTA overrides."
+)
 group_col = "Site Section" if group_choice == "Site Section" else "Page Template"
 
 # Global CTR curve
 st.subheader("Global CTR Curve (Editable)")
 st.caption("Curve should sum to ~0.40 across positions 1–20 to reflect ~60% zero-click.")
 base_curve = load_sample_ctr()
-curve_edit = st.data_editor(base_curve, num_rows="dynamic", use_container_width=True, key="global_ctr_editor")
+curve_edit = st.data_editor(
+    base_curve,
+    num_rows="dynamic",
+    use_container_width=True,
+    key="global_ctr_editor"
+)
 # Build per-group CTR table by copying edited curve to every group column
 ctr_table = build_group_ctr(sorted(df[group_col].unique().tolist()), curve_edit)
 
 # RTA rate overrides per group
 st.subheader(f"RTA Submit Rate by {group_choice}")
 st.caption("Enter as decimals (e.g., 0.008 = 0.8%). Rows not listed fall back to the global default above.")
-user_defaults = {"shop": 0.0030, "locations": 0.0280, "homepage": 0.0210, "ideas": 0.0037, "inspiration": 0.0011, "professionals": 0.0044, "performance": 0.0067}
+user_defaults = {
+    "shop": 0.0030, "locations": 0.0280, "homepage": 0.0210,
+    "ideas": 0.0037, "inspiration": 0.0011, "professionals": 0.0044, "performance": 0.0067
+}
 groups = sorted(df[group_col].unique().tolist())
 rta_rows = [{group_choice: g, "RTA Rate": user_defaults.get(str(g).lower(), 0.008)} for g in groups]
-rta_df = st.data_editor(pd.DataFrame(rta_rows), num_rows="dynamic", use_container_width=True, key="rta_editor")
+rta_df = st.data_editor(
+    pd.DataFrame(rta_rows),
+    num_rows="dynamic",
+    use_container_width=True,
+    key="rta_editor"
+)
 
 def rta_rate_map_from_editor(df_rate: pd.DataFrame) -> Dict[str, float]:
     colname = group_choice
@@ -410,9 +478,17 @@ for i in range(1, max_phases + 1):
     with phase_container.expander(f"Phase {i}", expanded=True if i == 1 else False):
         cols = st.columns([2, 1])
         selected = cols[0].multiselect(
-            f"{group_choice}s in Phase {i}", options=groups, default=[] if i > 1 else groups[:2], key=f"phase_grp_{i}"
+            f"{group_choice}s in Phase {i}",
+            options=groups, default=[] if i > 1 else groups[:2],
+            key=f"phase_grp_{i}",
+            help="Select one or more groups to ship together in this phase."
         )
-        months = cols[1].number_input(f"Duration (months)", min_value=0, max_value=12, value=3 if i <= 2 else 0, step=1, key=f"phase_months_{i}")
+        months = cols[1].number_input(
+            "Duration (months)",
+            min_value=0, max_value=12, value=3 if i <= 2 else 0, step=1,
+            key=f"phase_months_{i}",
+            help="How long this phase takes before its groups become eligible for gains."
+        )
         if months > 0 and selected:
             phases.append({"name": f"Phase {i}", "groups": selected, "months": int(months)})
 
@@ -491,9 +567,21 @@ def to_csv_bytes(df_: pd.DataFrame) -> bytes:
 
 c1, c2 = st.columns(2)
 with c1:
-    st.download_button("Download Monthly Summary (CSV)", data=to_csv_bytes(monthly), file_name="monthly_forecast.csv", mime="text/csv")
+    st.download_button(
+        "Download Monthly Summary (CSV)",
+        data=to_csv_bytes(monthly),
+        file_name="monthly_forecast.csv",
+        mime="text/csv",
+        help="All months × scenarios with realized metrics."
+    )
 with c2:
-    st.download_button(f"Download Per-{group_choice} Monthly (CSV)", data=to_csv_bytes(per_group_monthly), file_name="per_group_monthly.csv", mime="text/csv")
+    st.download_button(
+        f"Download Per-{group_choice} Monthly (CSV)",
+        data=to_csv_bytes(per_group_monthly),
+        file_name="per_group_monthly.csv",
+        mime="text/csv",
+        help="Per-group rollup by month and scenario."
+    )
 
 # Notes
 st.markdown("""
