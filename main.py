@@ -26,7 +26,6 @@ st.caption("Forecast traffic → RTA submits → job closes → revenue from ran
 # ---------- Global CSS: left-align all st.dataframe cells ----------
 st.markdown("""
 <style>
-/* Left-align headers and cells inside all Streamlit dataframes */
 .stDataFrame table th, .stDataFrame table td { text-align: left !important; }
 </style>
 """, unsafe_allow_html=True)
@@ -230,6 +229,25 @@ def run_forecast(
     # Per-row RTA rate vector (fallback to default if missing)
     per_row_rta_rate = df[group_col].map(rta_rates_map).fillna(rta_rate_default).to_numpy()
 
+    # ---- Baseline (all-in) monthly aggregates for comparison (constant each month) ----
+    base_rtas = baseline_clicks * per_row_rta_rate
+    base_jobs = base_rtas * close_rate
+    base_clicks_total = float(baseline_clicks.sum())
+    base_rtas_total = int(math.floor(base_rtas.sum()))
+    base_jobs_total = int(math.floor(base_jobs.sum()))
+    base_rev_min = base_jobs_total * rev_bounds["min"]
+    base_rev_avg = base_jobs_total * rev_bounds["avg"]
+    base_rev_max = base_jobs_total * rev_bounds["max"]
+    baseline_monthly_df = pd.DataFrame({
+        "Month": list(range(1, 13)),
+        "Clicks_baseline": [base_clicks_total]*12,
+        "RTA_baseline": [base_rtas_total]*12,
+        "Jobs_baseline": [base_jobs_total]*12,
+        "RevMin_baseline": [base_rev_min]*12,
+        "RevAvg_baseline": [base_rev_avg]*12,
+        "RevMax_baseline": [base_rev_max]*12,
+    }).set_index("Month")
+
     monthly_rows = []
 
     for scen in scenarios:
@@ -266,12 +284,29 @@ def run_forecast(
                 "Scenario": scen,
                 "Month": m,
                 "Total SV": float(df["SV"].sum()),
-                "Clicks": float(total_clicks),
-                "RTA Submits": int(total_rtas),
-                "Job Closes": int(total_jobs),
-                "Revenue Min": float(rev_min),
-                "Revenue Avg": float(rev_avg),
-                "Revenue Max": float(rev_max),
+                # Post-change (All-in)
+                "Clicks_allin": float(total_clicks),
+                "RTA_allin": int(total_rtas),
+                "Jobs_allin": int(total_jobs),
+                "RevenueMin_allin": float(rev_min),
+                "RevenueAvg_allin": float(rev_avg),
+                "RevenueMax_allin": float(rev_max),
+                # Baseline (same every month)
+                "Clicks_baseline": baseline_monthly_df.loc[m, "Clicks_baseline"],
+                "RTA_baseline": int(baseline_monthly_df.loc[m, "RTA_baseline"]),
+                "Jobs_baseline": int(baseline_monthly_df.loc[m, "Jobs_baseline"]),
+                "RevMin_baseline": float(baseline_monthly_df.loc[m, "RevMin_baseline"]),
+                "RevAvg_baseline": float(baseline_monthly_df.loc[m, "RevAvg_baseline"]),
+                "RevMax_baseline": float(baseline_monthly_df.loc[m, "RevMax_baseline"]),
+                # Incremental (Post − Baseline), clipped for counts
+                "Clicks_incr": float(total_clicks - baseline_monthly_df.loc[m, "Clicks_baseline"]),
+                "RTA_incr": int(max(0, total_rtas - baseline_monthly_df.loc[m, "RTA_baseline"])),
+
+                "Jobs_incr": int(max(0, total_jobs - baseline_monthly_df.loc[m, "Jobs_baseline"])),
+                "RevMin_incr": float(max(0.0, rev_min - baseline_monthly_df.loc[m, "RevMin_baseline"])),
+                "RevAvg_incr": float(max(0.0, rev_avg - baseline_monthly_df.loc[m, "RevAvg_baseline"])),
+                "RevMax_incr": float(max(0.0, rev_max - baseline_monthly_df.loc[m, "RevMax_baseline"])),
+                # Gating context
                 "Overall Migrated %": overall_pct[m],
                 "Ramp": float(ramp),
                 "Sitewide Mult": float(sitewide_mult),
@@ -279,7 +314,7 @@ def run_forecast(
 
     monthly = pd.DataFrame(monthly_rows)
 
-    # Per-group monthly rollup
+    # Per-group monthly rollup (All-in)
     tpl_rows = []
     for scen in scenarios:
         shifted_ranks = apply_rank_shift(df["Current Rank"].to_numpy(), scen)
@@ -290,7 +325,6 @@ def run_forecast(
             potential_clicks = project_clicks(df.loc[g.index, "SV"].to_numpy(), scen_ctr)
             baseline_clicks_tpl = project_clicks(df.loc[g.index, "SV"].to_numpy(), base_ctr)
             incr_potential = np.maximum(0.0, potential_clicks - baseline_clicks_tpl)
-
             for m in range(1, 13):
                 ramp = realization_factor(m, runway_months, ramp_mode, ramp_months)
                 sitewide_mult = classifier_multiplier_for_pct(overall_pct[m], classifier_milestones)
@@ -432,10 +466,7 @@ st.subheader("Global CTR Curve (Editable)")
 st.caption("Curve should sum to ~0.40 across positions 1–20 to reflect ~60% zero-click.")
 base_curve = load_sample_ctr()
 curve_edit = st.data_editor(
-    base_curve,
-    num_rows="dynamic",
-    use_container_width=True,
-    key="global_ctr_editor"
+    base_curve, num_rows="dynamic", use_container_width=True, key="global_ctr_editor"
 )
 # Build per-group CTR table by copying edited curve to every group column
 ctr_table = build_group_ctr(sorted(df[group_col].unique().tolist()), curve_edit)
@@ -449,12 +480,7 @@ user_defaults = {
 }
 groups = sorted(df[group_col].unique().tolist())
 rta_rows = [{group_choice: g, "RTA Rate": user_defaults.get(str(g).lower(), 0.008)} for g in groups]
-rta_df = st.data_editor(
-    pd.DataFrame(rta_rows),
-    num_rows="dynamic",
-    use_container_width=True,
-    key="rta_editor"
-)
+rta_df = st.data_editor(pd.DataFrame(rta_rows), num_rows="dynamic", use_container_width=True, key="rta_editor")
 
 def rta_rate_map_from_editor(df_rate: pd.DataFrame) -> Dict[str, float]:
     colname = group_choice
@@ -518,22 +544,39 @@ with st.spinner("Running forecast..."):
 monthly = results["monthly"]
 per_group_monthly = results["per_group_monthly"]
 
-# Executive Summary
-st.subheader("Executive Summary (12 months)")
-summary = monthly.groupby("Scenario").agg({
-    "Clicks": "sum",
-    "RTA Submits": "sum",
-    "Job Closes": "sum",
-    "Revenue Min": "sum",
-    "Revenue Avg": "sum",
-    "Revenue Max": "sum",
+# -----------------------------
+# Executive Summaries
+# -----------------------------
+st.subheader("Executive Summary – All-in (12 months)")
+summary_allin = monthly.groupby("Scenario").agg({
+    "Clicks_allin": "sum",
+    "RTA_allin": "sum",
+    "Jobs_allin": "sum",
+    "RevenueMin_allin": "sum",
+    "RevenueAvg_allin": "sum",
+    "RevenueMax_allin": "sum",
 }).reset_index()
-summary["RTA Submits"] = summary["RTA Submits"].astype(int)
-summary["Job Closes"] = summary["Job Closes"].astype(int)
-st.dataframe(summary, use_container_width=True)
+summary_allin["RTA_allin"] = summary_allin["RTA_allin"].astype(int)
+summary_allin["Jobs_allin"] = summary_allin["Jobs_allin"].astype(int)
+st.dataframe(summary_allin, use_container_width=True)
 
+st.subheader("Executive Summary – Incremental vs Baseline (12 months)")
+summary_incr = monthly.groupby("Scenario").agg({
+    "Clicks_incr": "sum",
+    "RTA_incr": "sum",
+    "Jobs_incr": "sum",
+    "RevMin_incr": "sum",
+    "RevAvg_incr": "sum",
+    "RevMax_incr": "sum",
+}).reset_index()
+summary_incr["RTA_incr"] = summary_incr["RTA_incr"].astype(int)
+summary_incr["Jobs_incr"] = summary_incr["Jobs_incr"].astype(int)
+st.dataframe(summary_incr, use_container_width=True)
+
+# -----------------------------
 # Month 12 Snapshot
-st.subheader("Month 12 Snapshot")
+# -----------------------------
+st.subheader("Month 12 Snapshot (All-in & Incremental)")
 month12 = monthly[monthly["Month"] == 12].copy()
 cols = st.columns(len(scenarios))
 for i, scen in enumerate(scenarios):
@@ -541,25 +584,38 @@ for i, scen in enumerate(scenarios):
     if m.empty:
         continue
     with cols[i]:
-        st.metric(f"{scen} – Clicks (M12)", f"{m['Clicks'].iloc[0]:,.0f}")
-        st.metric("RTA Submits (M12)", f"{m['RTA Submits'].iloc[0]:,d}")
-        st.metric("Job Closes (M12)", f"{m['Job Closes'].iloc[0]:,d}")
-        st.metric("Revenue Avg (M12)", f"${m['Revenue Avg'].iloc[0]:,.0f}")
+        st.metric(f"{scen} – Clicks (M12, All-in)", f"{m['Clicks_allin'].iloc[0]:,.0f}")
+        st.metric("RTA (M12, All-in)", f"{m['RTA_allin'].iloc[0]:,d}")
+        st.metric("Jobs (M12, All-in)", f"{m['Jobs_allin'].iloc[0]:,d}")
+        st.metric("Revenue Avg (M12, All-in)", f"${m['RevenueAvg_allin'].iloc[0]:,.0f}")
+        st.metric("Revenue Avg (M12, Incremental)", f"${m['RevAvg_incr'].iloc[0]:,.0f}")
 
+# -----------------------------
 # Trends
-st.subheader("Monthly Trends – Revenue Avg by Scenario")
-rev_trend = monthly.pivot_table(index="Month", columns="Scenario", values="Revenue Avg", aggfunc="sum").reset_index()
-st.line_chart(rev_trend.set_index("Month"))
+# -----------------------------
+st.subheader("Monthly Trends – Revenue Avg by Scenario (All-in)")
+rev_trend_allin = monthly.pivot_table(index="Month", columns="Scenario", values="RevenueAvg_allin", aggfunc="sum").reset_index()
+st.line_chart(rev_trend_allin.set_index("Month"))
 
-# Per-Group Rollup
-st.subheader(f"Per-{group_choice} Monthly Rollup")
+st.subheader("Monthly Trends – Revenue Avg by Scenario (Incremental)")
+rev_trend_incr = monthly.pivot_table(index="Month", columns="Scenario", values="RevAvg_incr", aggfunc="sum").reset_index()
+st.line_chart(rev_trend_incr.set_index("Month"))
+
+# -----------------------------
+# Per-Group Rollup (All-in)
+# -----------------------------
+st.subheader(f"Per-{group_choice} Monthly Rollup (All-in)")
 st.dataframe(per_group_monthly, use_container_width=True)
 
-# Detailed Monthly Table
-st.subheader("Detailed Monthly Table")
+# -----------------------------
+# Detailed Monthly Table (All columns)
+# -----------------------------
+st.subheader("Detailed Monthly Table (All-in & Incremental)")
 st.dataframe(monthly, use_container_width=True)
 
+# -----------------------------
 # Downloads
+# -----------------------------
 st.subheader("Downloads")
 @st.cache_data
 def to_csv_bytes(df_: pd.DataFrame) -> bytes:
@@ -568,26 +624,26 @@ def to_csv_bytes(df_: pd.DataFrame) -> bytes:
 c1, c2 = st.columns(2)
 with c1:
     st.download_button(
-        "Download Monthly Summary (CSV)",
+        "Download Monthly (All columns, CSV)",
         data=to_csv_bytes(monthly),
-        file_name="monthly_forecast.csv",
+        file_name="monthly_forecast_all_columns.csv",
         mime="text/csv",
-        help="All months × scenarios with realized metrics."
+        help="Includes baseline, all-in, and incremental columns for each month × scenario."
     )
 with c2:
     st.download_button(
-        f"Download Per-{group_choice} Monthly (CSV)",
+        f"Download Per-{group_choice} Monthly (All-in, CSV)",
         data=to_csv_bytes(per_group_monthly),
-        file_name="per_group_monthly.csv",
+        file_name="per_group_monthly_allin.csv",
         mime="text/csv",
-        help="Per-group rollup by month and scenario."
+        help="Per-group all-in results by month and scenario."
     )
 
 # Notes
 st.markdown("""
 **Modeling notes**
-- CTR curve should sum to ~0.40 across positions 1–20 (assumes ~60% zero-click). It is **global** and applied to all groups.
-- Rank improvement heuristics toned down (see sidebar). Use **Scenario dampening** to further reduce aggressiveness.
+- CTR curve sums to ~0.40 across positions 1–20 (assumes ~60% zero-click) and is **global** across groups.
+- Rank improvement heuristics are milder by default. Use **Scenario dampening** to further reduce aggressiveness.
 - No gains before runway. After runway, incremental gains follow your selected **ramp** (Step/Linear/S-curve) and are further limited by rollout status and sitewide classifier milestones.
 - Per-group RTA rates override the global default when provided.
 - RTA submits and Job Closes are floored to integers monthly; revenue uses those integers.
