@@ -6,7 +6,7 @@ import math
 import numpy as np
 import pandas as pd
 import streamlit as st
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 st.set_page_config(page_title="SEO Impact Forecaster", layout="wide")
 st.title("SEO Impact Forecaster")
@@ -28,24 +28,24 @@ Estimates *traffic → RTA submits → job closes → revenue* from SEO ranking 
 **How to use**  
 1) Upload **Keyword CSV** with: **URL, SV, Current Rank, Page Template**.  
 2) *(Optional)* Upload a **Master URL list (one URL per row)** to drive migration % off your true page inventory.  
-3) Choose **grouping**: **Site Section** (derived from URL; single-segment = `misc`) or **Page Template**.  
+3) Choose **grouping**: **Site Section** (derived from the URL; single segment → `misc`, homepage → `homepage`) or **Page Template**.  
 4) Tune **RTA rates** (global + per-group), **close rate**, and **revenue bounds**.  
-5) Define **rollout phases** (who ships when).  
-6) Choose **runway** (no gains during 3/6 months) and **ramp** (Step/Linear/S-curve) for post-runway realization.  
-7) Use **dampening** + **classifier caps (30/50/70/90%)** for conservative modeling.
+5) Define **rollout phases** (which groups ship together and for how long).  
+6) Choose a **runway** (no gains for first 3/6 months) and **ramp** (Step/Linear/S-curve) for post-runway realization.  
+7) Use **dampening** + **classifier caps (30/50/70/90%)** to stay conservative.
 
 **Runway vs Ramp**  
-- *Runway* = hard delay (no incremental gains).  
-- *Ramp* = shape of realization after runway ends (Step=instant, Linear=steady, S-curve=slow→fast→plateau).
+- *Runway* = hard delay: no incremental value until it ends.  
+- *Ramp* = how quickly value materializes **after** runway (Step=instant, Linear=steady, S-curve=slow→fast→plateau).
 
 **Classifier caps**  
 Realized gains are capped by **overall % of site migrated**. As migration crosses 30/50/70/90%, the cap increases.
 
 **Counts are integers**  
-RTA submits & job closes are **floored monthly**; revenue uses those integers.
+RTA submits & job closes are **floored monthly** (no fractional conversions). Revenue uses these integers.
 
 **CTR curve**  
-Global SERP CTR curve for positions 1–20. Default sums to ~0.40 (~60% zero-click).
+Global SERP CTR curve for positions 1–20. Default sums to ~0.40 (≈60% zero-click).
 """)
 
 # -----------------------------
@@ -53,6 +53,7 @@ Global SERP CTR curve for positions 1–20. Default sums to ~0.40 (~60% zero-cli
 # -----------------------------
 @st.cache_data(show_spinner=False)
 def load_sample_ctr() -> pd.DataFrame:
+    # Default curve (positions 1..20), normalized to sum ≈ 0.40 to respect ~60% zero-click
     base = pd.DataFrame({
         "Position": list(range(1, 21)),
         "CTR": [0.28, 0.14, 0.09, 0.06, 0.04, 0.028, 0.022, 0.018, 0.015, 0.012,
@@ -77,9 +78,8 @@ def load_csv(file_bytes: bytes) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def load_master_urls(file_bytes: bytes) -> pd.DataFrame:
-    # support either a single 'URL'/'URLs' column or unnamed first column
+    # Accepts one URL per row; tries to auto-detect the column
     df = pd.read_csv(io.BytesIO(file_bytes))
-    # pick the first non-empty column as URLs
     url_col = None
     for c in df.columns:
         if str(c).strip().lower() in ("url", "urls"):
@@ -87,10 +87,9 @@ def load_master_urls(file_bytes: bytes) -> pd.DataFrame:
             break
     if url_col is None:
         url_col = df.columns[0]
-    out = pd.DataFrame({"URL": df[url_col].astype(str)})
-    return out
+    return pd.DataFrame({"URL": df[url_col].astype(str)})
 
-# Rank scenario rules (mild)
+# Rank scenario rules (milder by default)
 def rank_delta_rules(rank: float, flavor: str) -> int:
     if flavor == "conservative":
         if 15 <= rank <= 20: return 1
@@ -134,18 +133,23 @@ def build_group_ctr(groups: List[str], default_ctr: pd.DataFrame) -> pd.DataFram
 def default_revenue_bounds(avg_revenue: float) -> Dict[str, float]:
     return {"min": avg_revenue * 0.8, "avg": avg_revenue, "max": avg_revenue * 1.2}
 
-def expand_rollout_phases(phases: List[Dict], groups: List[str]) -> pd.DataFrame:
-    months = list(range(1, 13))
-    rows, current_month = [], 1
-    live_month = {g: 13 for g in groups}
+# --------- Rollouts, classifier, gates ---------
+def expand_rollout_phases(phases: List[Dict], groups: List[str], horizon: int, start_offset: int) -> pd.DataFrame:
+    months = list(range(1, horizon + 1))
+    rows = []
+    current_month = max(1, int(start_offset))  # phases start at global work start
+    live_month = {g: horizon + 1 for g in groups}  # default: not live within horizon
+
     for phase in phases:
         dur = max(1, int(phase.get("months", 1)))
         phase_groups = phase.get("groups", [])
-        lm = min(12, current_month + dur - 1)
+        lm = min(horizon, current_month + dur - 1)
         for g in phase_groups:
-            live_month[g] = min(live_month.get(g, 13), lm)
+            live_month[g] = min(live_month.get(g, horizon + 1), lm)
         current_month += dur
-        if current_month > 12: break
+        if current_month > horizon:
+            break
+
     for m in months:
         for g in groups:
             rows.append({"Month": m, "Group": g, "IsLive": 1 if m >= live_month[g] else 0})
@@ -178,21 +182,10 @@ def realization_factor(month: int, runway: int, mode: str, ramp_months: int) -> 
     x = float(min(1.0, t / max(1, ramp_months)))  # S-curve
     return 3 * x * x - 2 * x * x * x
 
-def apply_rank_shift(current_rank: np.ndarray, scenario: str) -> np.ndarray:
-    if scenario == "Baseline": return current_rank.copy()
-    flavor = {"Conservative": "conservative", "Expected": "expected", "Aggressive": "aggressive"}.get(scenario, "expected")
-    f = np.frompyfunc(lambda r: max(1.0, r - rank_delta_rules(float(r), flavor)), 1, 1)
-    return f(current_rank).astype(float)
+def work_started_gate(month: int, start_month: int) -> float:
+    return 1.0 if month >= start_month else 0.0
 
-def ctr_from_curve(cur_rank: np.ndarray, ctr_col: pd.Series) -> np.ndarray:
-    max_pos = int(ctr_col.index.max())
-    pos = np.clip(np.rint(cur_rank).astype(int), 1, max_pos)
-    return ctr_col.reindex(pos).to_numpy()
-
-def project_clicks(sv: np.ndarray, ctr: np.ndarray) -> np.ndarray:
-    return sv * ctr
-
-# NOTE: no persist=True → UI changes recompute
+# --------- Core forecast ---------
 @st.cache_data(show_spinner=True)
 def run_forecast(
     data: pd.DataFrame,
@@ -209,19 +202,22 @@ def run_forecast(
     ramp_mode: str,
     ramp_months: int,
     dampening: float,
-    counts_by_group_override: pd.Series | None = None,
+    horizon_months: int,
+    work_start_month: int,
+    counts_by_group_override: Optional[pd.Series] = None,
 ) -> Dict[str, pd.DataFrame]:
+
     df = data.copy()
     groups = sorted(df[group_col].unique().tolist())
     ctr_indexed = ctr_table.set_index("Position")
 
     # Rollout & migration share over time
-    rollout = expand_rollout_phases(rollout_phases, groups)
+    rollout = expand_rollout_phases(rollout_phases, groups, horizon_months, work_start_month)
     counts = counts_by_group_override if counts_by_group_override is not None else df[group_col].value_counts()
-    counts = counts.reindex(groups).fillna(0)  # align
+    counts = counts.reindex(groups).fillna(0)
     rollout = compute_overall_migrated_pct(rollout, counts)
-    live_map = {m: set(rollout[(rollout["Month"] == m) & (rollout["IsLive"] == 1)]["Group"]) for m in range(1, 13)}
-    overall_pct = {m: float(rollout[rollout["Month"] == m]["OverallMigratedPct"].max()) for m in range(1, 13)}
+    live_map = {m: set(rollout[(rollout["Month"] == m) & (rollout["IsLive"] == 1)]["Group"]) for m in range(1, horizon_months + 1)}
+    overall_pct = {m: float(rollout[rollout["Month"] == m]["OverallMigratedPct"].max()) for m in range(1, horizon_months + 1)}
 
     # Baseline clicks per row
     base_ctr_rows = []
@@ -232,9 +228,10 @@ def run_forecast(
     base_ctr_join = pd.concat(base_ctr_rows).set_index("idx").loc[df.index]
     baseline_clicks = project_clicks(df["SV"].to_numpy(), base_ctr_join["baseline_ctr"].to_numpy())
 
+    # Per-row RTA rate vector (fallback to default if missing)
     per_row_rta_rate = df[group_col].map(rta_rates_map).fillna(rta_rate_default).to_numpy()
 
-    # Baseline monthly (constant)
+    # Baseline monthly (constant across horizon)
     base_rtas = baseline_clicks * per_row_rta_rate
     base_jobs = base_rtas * close_rate
     base_clicks_total = float(baseline_clicks.sum())
@@ -244,16 +241,17 @@ def run_forecast(
     base_rev_avg = base_jobs_total * rev_bounds["avg"]
     base_rev_max = base_jobs_total * rev_bounds["max"]
     baseline_monthly_df = pd.DataFrame({
-        "Month": list(range(1, 13)),
-        "Clicks_baseline": [base_clicks_total]*12,
-        "RTA_baseline": [base_rtas_total]*12,
-        "Jobs_baseline": [base_jobs_total]*12,
-        "RevMin_baseline": [base_rev_min]*12,
-        "RevAvg_baseline": [base_rev_avg]*12,
-        "RevMax_baseline": [base_rev_max]*12,
+        "Month": list(range(1, horizon_months + 1)),
+        "Clicks_baseline": [base_clicks_total]*horizon_months,
+        "RTA_baseline": [base_rtas_total]*horizon_months,
+        "Jobs_baseline": [base_jobs_total]*horizon_months,
+        "RevMin_baseline": [base_rev_min]*horizon_months,
+        "RevAvg_baseline": [base_rev_avg]*horizon_months,
+        "RevMax_baseline": [base_rev_max]*horizon_months,
     }).set_index("Month")
 
     monthly_rows = []
+
     for scen in scenarios:
         shifted_ranks = apply_rank_shift(df["Current Rank"].to_numpy(), scen)
         scen_ctr_rows = []
@@ -265,12 +263,13 @@ def run_forecast(
         potential_clicks = project_clicks(df["SV"].to_numpy(), scen_ctr["scen_ctr"].to_numpy())
         incr_potential_clicks = np.maximum(0.0, potential_clicks - baseline_clicks)
 
-        for m in range(1, 13):
+        for m in range(1, horizon_months + 1):
+            gate = work_started_gate(m, work_start_month)
             ramp = realization_factor(m, runway_months, ramp_mode, ramp_months)
             sitewide_mult = classifier_multiplier_for_pct(overall_pct[m], classifier_milestones)
             is_live = df[group_col].isin(live_map[m]).to_numpy().astype(float)
 
-            realized_clicks = baseline_clicks + incr_potential_clicks * is_live * sitewide_mult * ramp * dampening
+            realized_clicks = baseline_clicks + incr_potential_clicks * is_live * sitewide_mult * ramp * dampening * gate
             rtas = realized_clicks * per_row_rta_rate
             jobs = rtas * close_rate
 
@@ -325,11 +324,12 @@ def run_forecast(
             potential_clicks = project_clicks(df.loc[g.index, "SV"].to_numpy(), scen_ctr)
             baseline_clicks_tpl = project_clicks(df.loc[g.index, "SV"].to_numpy(), base_ctr)
             incr_potential = np.maximum(0.0, potential_clicks - baseline_clicks_tpl)
-            for m in range(1, 13):
+            for m in range(1, horizon_months + 1):
+                gate = work_started_gate(m, work_start_month)
                 ramp = realization_factor(m, runway_months, ramp_mode, ramp_months)
                 sitewide_mult = classifier_multiplier_for_pct(overall_pct[m], classifier_milestones)
                 live = 1 if gname in live_map[m] else 0
-                realized_clicks = baseline_clicks_tpl.sum() + incr_potential.sum() * live * sitewide_mult * ramp * dampening
+                realized_clicks = baseline_clicks_tpl.sum() + incr_potential.sum() * live * sitewide_mult * ramp * dampening * gate
                 rta_rate_group = float(rta_rates_map.get(gname, rta_rate_default))
                 rtas = realized_clicks * rta_rate_group
                 jobs = rtas * close_rate
@@ -353,13 +353,13 @@ with cols_upload[0]:
     upload = st.file_uploader(
         "Keyword CSV (URL, SV, Current Rank, Page Template)",
         type=["csv"],
-        help="Your keyword list with required columns.",
+        help="Your keyword list with the four required columns.",
     )
 with cols_upload[1]:
     master_upload = st.file_uploader(
         "Master URL list (optional)",
         type=["csv"],
-        help="One URL per row; drives migration % off true page inventory.",
+        help="One URL per row; used to compute migration % off real inventory.",
     )
 
 with st.sidebar:
@@ -380,33 +380,39 @@ with st.sidebar:
         min_value=0.0, max_value=10_000_000.0, value=23_000.0, step=500.0,
         help="Mean revenue per closed job."
     )
-    default_bounds = default_revenue_bounds(avg_rev)
+    bounds = default_revenue_bounds(avg_rev)
     rev_min = st.number_input(
         label="Min revenue per job ($)",
-        min_value=0.0, max_value=avg_rev, value=float(default_bounds["min"]), step=500.0
+        min_value=0.0, max_value=float(avg_rev), value=float(bounds["min"]), step=500.0
     )
     rev_max = st.number_input(
         label="Max revenue per job ($)",
-        min_value=avg_rev, max_value=50_000_000.0, value=float(default_bounds["max"]), step=500.0
+        min_value=float(avg_rev), max_value=50_000_000.0, value=float(bounds["max"]), step=500.0
     )
 
     st.markdown("---")
-    st.markdown("**Runway & Realization**")
+    st.markdown("**Runway, Ramp & Timeline**")
+    horizon_months = st.selectbox(
+        "Forecast horizon (months)", [12, 18, 24, 36], index=0,
+        help="Extend beyond 12 months when work starts late or ramps slowly."
+    )
+    work_start_month = st.number_input(
+        "Work start month (1 = now)", min_value=1, max_value=int(horizon_months),
+        value=1, step=1,
+        help="Before this month, no incremental value accrues."
+    )
     runway_choice = st.radio(
-        "Runway before benefits start",
-        options=["3 months", "6 months"], index=0, horizontal=True,
-        help="Model waits this long before any incremental gains can materialize."
+        "Runway before benefits start", options=["3 months", "6 months"], index=0, horizontal=True,
+        help="No incremental gains during runway."
     )
     runway_months = 3 if runway_choice.startswith("3") else 6
     ramp_mode = st.radio(
-        "Post-runway ramp",
-        options=["Step", "Linear", "S-curve"], index=1, horizontal=True,
-        help="How quickly incremental gains realize after the runway ends."
+        "Post-runway ramp", options=["Step", "Linear", "S-curve"], index=1, horizontal=True,
+        help="Realization shape after runway."
     )
     ramp_months = st.number_input(
-        label="Ramp duration (months)",
-        min_value=1, max_value=12, value=3, step=1,
-        help="Months to reach ~100% of incremental gains after the runway."
+        "Ramp duration (months)", min_value=1, max_value=12, value=6, step=1,
+        help="Months to reach ~100% of gains after runway."
     )
 
     st.markdown("---")
@@ -421,9 +427,8 @@ with st.sidebar:
     st.markdown("**Scenarios**")
     scen_opts = ["Baseline", "Conservative", "Expected", "Aggressive"]
     scenarios = st.multiselect(
-        "Select scenarios",
-        options=scen_opts, default=["Baseline", "Expected"],
-        help="Baseline = current ranks; others use heuristics by position band."
+        "Select scenarios", options=scen_opts, default=["Baseline", "Expected"],
+        help="Baseline = current ranks; others apply rank-lift heuristics."
     )
 
     st.markdown("---")
@@ -469,8 +474,7 @@ st.dataframe(df.head(20), width="stretch")
 # Grouping selection
 st.subheader("Forecast Grouping")
 group_choice = st.radio(
-    "Group by",
-    options=["Site Section", "Page Template"], index=0, horizontal=True,
+    "Group by", options=["Site Section", "Page Template"], index=0, horizontal=True,
     help="The chosen dimension is used for CTR curves, rollouts, and RTA overrides."
 )
 group_col = "Site Section" if group_choice == "Site Section" else "Page Template"
@@ -483,7 +487,7 @@ ctr_table = build_group_ctr(sorted(df[group_col].unique().tolist()), curve_edit)
 
 # RTA overrides
 st.subheader(f"RTA Submit Rate by {group_choice}")
-st.caption("Enter as decimals (e.g., 0.008 = 0.8%).")
+st.caption("Enter as decimals (e.g., 0.008 = 0.8%). Rows not listed fall back to the global default above.")
 user_defaults = {
     "shop": 0.0030, "locations": 0.0280, "homepage": 0.0210,
     "ideas": 0.0037, "inspiration": 0.0011, "professionals": 0.0044, "performance": 0.0067
@@ -544,51 +548,76 @@ with st.spinner("Running forecast..."):
         ramp_mode=ramp_mode,
         ramp_months=int(ramp_months),
         dampening=float(dampening),
+        horizon_months=int(horizon_months),
+        work_start_month=int(work_start_month),
         counts_by_group_override=counts_override if group_col == "Site Section" else None,
     )
 
 monthly = results["monthly"].copy()
 per_group_monthly = results["per_group_monthly"].copy()
 
-# ensure numeric for charts
-for col in ["RevenueAvg_allin", "RevAvg_incr"]:
-    if col in monthly.columns:
-        monthly[col] = pd.to_numeric(monthly[col], errors="coerce").fillna(0.0)
+# ---------- Ensure numeric dtypes for charts/summaries ----------
+num_cols = [
+    # all-in
+    "Clicks_allin","RTA_allin","Jobs_allin","RevenueMin_allin","RevenueAvg_allin","RevenueMax_allin",
+    # baseline
+    "Clicks_baseline","RTA_baseline","Jobs_baseline","RevMin_baseline","RevAvg_baseline","RevMax_baseline",
+    # incremental
+    "Clicks_incr","RTA_incr","Jobs_incr","RevMin_incr","RevAvg_incr","RevMax_incr",
+    # context
+    "Overall Migrated %","Ramp","Sitewide Mult"
+]
+for c in [c for c in num_cols if c in monthly.columns]:
+    monthly[c] = pd.to_numeric(monthly[c], errors="coerce").fillna(0.0)
 
-# Executive summaries
-st.subheader("Executive Summary – All-in (12 months)")
+# -----------------------------
+# Executive Summaries
+# -----------------------------
+st.subheader(f"Executive Summary – All-in ({horizon_months} months)")
 summary_allin = monthly.groupby("Scenario").agg({
-    "Clicks_allin": "sum", "RTA_allin": "sum", "Jobs_allin": "sum",
-    "RevenueMin_allin": "sum", "RevenueAvg_allin": "sum", "RevenueMax_allin": "sum",
+    "Clicks_allin": "sum",
+    "RTA_allin": "sum",
+    "Jobs_allin": "sum",
+    "RevenueMin_allin": "sum",
+    "RevenueAvg_allin": "sum",
+    "RevenueMax_allin": "sum",
 }).reset_index()
-summary_allin["RTA_allin"] = summary_allin["RTA_allin"].astype(int)
-summary_allin["Jobs_allin"] = summary_allin["Jobs_allin"].astype(int)
+summary_allin["RTA_allin"] = summary_allin["RTA_allin"].round(0).astype(int)
+summary_allin["Jobs_allin"] = summary_allin["Jobs_allin"].round(0).astype(int)
 st.dataframe(summary_allin, width="stretch")
 
-st.subheader("Executive Summary – Incremental vs Baseline (12 months)")
+st.subheader(f"Executive Summary – Incremental vs Baseline ({horizon_months} months)")
 summary_incr = monthly.groupby("Scenario").agg({
-    "Clicks_incr": "sum", "RTA_incr": "sum", "Jobs_incr": "sum",
-    "RevMin_incr": "sum", "RevAvg_incr": "sum", "RevMax_incr": "sum",
+    "Clicks_incr": "sum",
+    "RTA_incr": "sum",
+    "Jobs_incr": "sum",
+    "RevMin_incr": "sum",
+    "RevAvg_incr": "sum",
+    "RevMax_incr": "sum",
 }).reset_index()
-summary_incr["RTA_incr"] = summary_incr["RTA_incr"].astype(int)
-summary_incr["Jobs_incr"] = summary_incr["Jobs_incr"].astype(int)
+summary_incr["RTA_incr"] = summary_incr["RTA_incr"].round(0).astype(int)
+summary_incr["Jobs_incr"] = summary_incr["Jobs_incr"].round(0).astype(int)
 st.dataframe(summary_incr, width="stretch")
 
-# Month 12 snapshot
-st.subheader("Month 12 Snapshot (All-in & Incremental)")
-m12 = monthly[monthly["Month"] == 12]
+# -----------------------------
+# Month snapshot (last month of horizon)
+# -----------------------------
+st.subheader(f"Month {horizon_months} Snapshot (All-in & Incremental)")
+snap = monthly[monthly["Month"] == int(horizon_months)]
 cols = st.columns(len(scenarios))
 for i, scen in enumerate(scenarios):
-    m = m12[m12["Scenario"] == scen]
+    m = snap[snap["Scenario"] == scen]
     if m.empty: continue
     with cols[i]:
-        st.metric(f"{scen} – Clicks (M12, All-in)", f"{m['Clicks_allin'].iloc[0]:,.0f}")
-        st.metric("RTA (M12, All-in)", f"{m['RTA_allin'].iloc[0]:,d}")
-        st.metric("Jobs (M12, All-in)", f"{m['Jobs_allin'].iloc[0]:,d}")
-        st.metric("Revenue Avg (M12, All-in)", f"${m['RevenueAvg_allin'].iloc[0]:,.0f}")
-        st.metric("Revenue Avg (M12, Incremental)", f"${m['RevAvg_incr'].iloc[0]:,.0f}")
+        st.metric(f"{scen} – Clicks (M{horizon_months}, All-in)", f"{m['Clicks_allin'].iloc[0]:,.0f}")
+        st.metric("RTA (M, All-in)", f"{m['RTA_allin'].iloc[0]:,d}")
+        st.metric("Jobs (M, All-in)", f"{m['Jobs_allin'].iloc[0]:,d}")
+        st.metric("Revenue Avg (M, All-in)", f"${m['RevenueAvg_allin'].iloc[0]:,.0f}")
+        st.metric("Revenue Avg (M, Incremental)", f"${m['RevAvg_incr'].iloc[0]:,.0f}")
 
+# -----------------------------
 # Trends
+# -----------------------------
 st.subheader("Monthly Trends – Revenue Avg by Scenario (All-in)")
 rev_trend_allin = monthly.pivot_table(index="Month", columns="Scenario", values="RevenueAvg_allin", aggfunc="sum").reset_index()
 st.line_chart(rev_trend_allin.set_index("Month"))
@@ -597,14 +626,18 @@ st.subheader("Monthly Trends – Revenue Avg by Scenario (Incremental)")
 rev_trend_incr = monthly.pivot_table(index="Month", columns="Scenario", values="RevAvg_incr", aggfunc="sum").reset_index()
 st.line_chart(rev_trend_incr.set_index("Month"))
 
+# -----------------------------
 # Per-Group & Details
+# -----------------------------
 st.subheader(f"Per-{group_choice} Monthly Rollup (All-in)")
 st.dataframe(per_group_monthly, width="stretch")
 
-st.subheader("Detailed Monthly Table (All-in & Incremental)")
+st.subheader("Detailed Monthly Table (All-in, Baseline & Incremental)")
 st.dataframe(monthly, width="stretch")
 
+# -----------------------------
 # Downloads
+# -----------------------------
 st.subheader("Downloads")
 @st.cache_data
 def to_csv_bytes(df_: pd.DataFrame) -> bytes:
@@ -617,7 +650,7 @@ with c1:
         data=to_csv_bytes(monthly),
         file_name="monthly_forecast_all_columns.csv",
         mime="text/csv",
-        help="Baseline, all-in, incremental for each month × scenario."
+        help="Baseline, all-in, and incremental for each month × scenario."
     )
 with c2:
     st.download_button(
